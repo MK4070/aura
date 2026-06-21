@@ -1,0 +1,197 @@
+services:
+  # --------------------------------------------------------
+  # Message Broker: Redpanda (Kafka-compatible)
+  # --------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.7
+    container_name: aura-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory ${REDPANDA_MEMORY:-1G}                         
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:${REDPANDA_EXT_PORT:-19092}
+    ports:
+      - "${REDPANDA_EXT_PORT:-19092}:19092"                     
+      - "127.0.0.1:${REDPANDA_ADMIN_PORT:-9644}:9644"           # admin API locked to localhost only
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - aura-net
+    logging:
+      driver: "local"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.7
+    container_name: aura-redpanda-init
+    entrypoint: ["bash", "-c"]
+    depends_on:
+      redpanda:
+        condition: service_healthy 
+    networks:
+      - aura-net
+    command: |
+      echo 'Waiting for Redpanda to be ready...'
+      rpk cluster info --brokers redpanda:9092
+
+      echo 'Creating topics...'
+      rpk topic create ${REDPANDA_TOPIC:-document-events} -p 3 -r 1 --brokers redpanda:9092 || true
+
+      echo 'Initialization check complete!'
+      "
+
+  # --------------------------------------------------------
+  # Database: Postgres
+  # --------------------------------------------------------
+  postgres:
+    image: postgres:18-alpine
+    container_name: aura-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_DB: "${POSTGRES_DB:-postgres}"
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - aura-net  
+    logging:
+      driver: "local"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------
+  # Vector Database: Qdrant
+  # --------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.18
+    container_name: aura-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QDRANT_REST_PORT:-6333}:6333"                       
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - aura-net  
+    logging:
+      driver: "local"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      # test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------
+  # Local LLM Engine: Ollama
+  # --------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.23.2
+    container_name: aura-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"                 
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - aura-net
+    logging:
+      driver: "local"
+      options:
+        max-size: "100m"            # larger budget — model output can be verbose
+        max-file: "3"
+    healthcheck:
+      # test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/11434"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # To run without a GPU, remove the deploy.resources block above
+
+  # --------------------------------------------------------
+  # Ingestion Service
+  # --------------------------------------------------------
+  uploader:
+    image: aura-ingestion:latest
+    container_name: aura-uploader
+    command: ["/uploader"]
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./.env
+    depends_on:
+      redpanda:
+        condition: service_healthy 
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy 
+      qdrant:
+        condition: service_healthy 
+    restart: unless-stopped
+    networks:
+      - aura-net
+
+  processor:
+    image: aura-ingestion:latest
+    container_name: aura-processor
+    command: ["/processor"]
+    expose:
+      - "8081"
+    env_file:
+      - ./.env
+    depends_on:
+      redpanda:
+        condition: service_healthy 
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy 
+      qdrant:
+        condition: service_healthy 
+    restart: unless-stopped
+    networks:
+      - aura-net
+    # deploy:
+    #   replicas: 3
+
+networks:
+  aura-net:
+    driver: bridge
+    name: aura-net
+
+volumes:
+  redpanda_data:
+  postgres_data:
+  qdrant_data:
+  ollama_data:

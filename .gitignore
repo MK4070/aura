@@ -1,0 +1,9 @@
+.vscode
+
+/docs/design_doc.md
+/docs/notes.md
+/docs/commands.md
+
+/deploy/.env.core
+/deploy/.env.obs
+/deploy/.env
