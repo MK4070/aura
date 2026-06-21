@@ -1,0 +1,60 @@
+name: CI - Unit Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-ingestion:
+    name: Test Ingestion (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ingestion
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache-dependency-path: services/ingestion/go.sum
+
+      - name: Install Dependencies
+        run: go mod download
+
+      - name: Run Unit Tests
+        run: go test -v -race ./...
+
+  test-query:
+    name: Test Query (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/query
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "services/query/uv.lock" 
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Unit Tests
+        run: uv run pytest tests/ -v
